@@ -14,6 +14,7 @@ Configuration requise (secrets GitHub Actions ou variables d'environnement) :
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -47,14 +48,29 @@ def envoyer_telegram(message: str) -> None:
         sys.exit(1)
 
 
-def recuperer_dernier_tirage():
-    req = urllib.request.Request(
-        EE_JSON_URL, headers={"User-Agent": "Mozilla/5.0"}
-    )
-    with urllib.request.urlopen(req, timeout=45) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    rounds = data.get("rounds", [])
-    return rounds[0] if rounds else None
+def recuperer_dernier_tirage(tentatives: int = 4):
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "fr-CA,fr;q=0.9,en;q=0.8",
+    }
+    derniere_erreur = None
+    for essai in range(1, tentatives + 1):
+        try:
+            req = urllib.request.Request(EE_JSON_URL, headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            rounds = data.get("rounds", [])
+            return rounds[0] if rounds else None
+        except Exception as e:
+            derniere_erreur = e
+            print(f"Tentative {essai}/{tentatives} échouée : {e}")
+            if essai < tentatives:
+                time.sleep(10)
+    raise derniere_erreur
 
 
 def charger_dernier_numero_connu():
@@ -86,7 +102,11 @@ def main():
         sys.exit(1)
 
     dernier_connu = charger_dernier_numero_connu()
-    tirage = recuperer_dernier_tirage()
+    try:
+        tirage = recuperer_dernier_tirage()
+    except Exception as e:
+        print(f"Échec de la récupération après plusieurs tentatives : {e}")
+        sys.exit(1)
 
     if tirage is None:
         print(f"[{datetime.now()}] Aucune donnée reçue depuis IRCC.")
