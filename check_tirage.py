@@ -16,6 +16,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -57,17 +58,26 @@ def recuperer_dernier_tirage(tentatives: int = 4):
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "fr-CA,fr;q=0.9,en;q=0.8",
     }
+    # URL directe, puis URL passant par un proxy public (utile si canada.ca
+    # bloque les requêtes venant de centres de données comme GitHub Actions).
+    urls_a_essayer = [
+        EE_JSON_URL,
+        "https://api.allorigins.win/raw?url="
+        + urllib.parse.quote(EE_JSON_URL, safe=""),
+    ]
+
     derniere_erreur = None
     for essai in range(1, tentatives + 1):
+        url_courante = urls_a_essayer[(essai - 1) % len(urls_a_essayer)]
         try:
-            req = urllib.request.Request(EE_JSON_URL, headers=headers)
+            req = urllib.request.Request(url_courante, headers=headers)
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             rounds = data.get("rounds", [])
             return rounds[0] if rounds else None
         except Exception as e:
             derniere_erreur = e
-            print(f"Tentative {essai}/{tentatives} échouée : {e}")
+            print(f"Tentative {essai}/{tentatives} ({url_courante[:40]}...) échouée : {e}")
             if essai < tentatives:
                 time.sleep(10)
     raise derniere_erreur
