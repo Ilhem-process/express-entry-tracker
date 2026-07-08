@@ -16,7 +16,6 @@ import os
 import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -24,6 +23,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 EE_JSON_URL = "https://www.canada.ca/content/dam/ircc/documents/json/ee_rounds_123_en.json"
+FALLBACK_API_URL = "https://can-ee-draws.karanjit-sagun01.workers.dev/api/draws/latest"
 STATE_FILE = "dernier_tirage.json"
 
 
@@ -58,29 +58,71 @@ def recuperer_dernier_tirage(tentatives: int = 4):
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "fr-CA,fr;q=0.9,en;q=0.8",
     }
-    # URL directe, puis URL passant par un proxy public (utile si canada.ca
-    # bloque les requêtes venant de centres de données comme GitHub Actions).
-    urls_a_essayer = [
-        EE_JSON_URL,
-        "https://api.allorigins.win/raw?url="
-        + urllib.parse.quote(EE_JSON_URL, safe=""),
-    ]
-
     derniere_erreur = None
     for essai in range(1, tentatives + 1):
-        url_courante = urls_a_essayer[(essai - 1) % len(urls_a_essayer)]
         try:
-            req = urllib.request.Request(url_courante, headers=headers)
+            req = urllib.request.Request(EE_JSON_URL, headers=headers)
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             rounds = data.get("rounds", [])
-            return rounds[0] if rounds else None
+            if rounds:
+                return normaliser_tirage_officiel(rounds[0])
         except Exception as e:
             derniere_erreur = e
-            print(f"Tentative {essai}/{tentatives} ({url_courante[:40]}...) échouée : {e}")
-            if essai < tentatives:
-                time.sleep(10)
+            print(f"Tentative {essai}/{tentatives} (source officielle) échouée : {e}")
+        if essai < tentatives:
+            time.sleep(10)
+
+    # Source officielle inaccessible après plusieurs essais (probablement
+    # bloquée pour les IP de centres de données) : on tente une source de
+    # secours tierce, hébergée sur Cloudflare, qui republie les mêmes
+    # données à partir d'IRCC.
+    print("Source officielle inaccessible, tentative via la source de secours...")
+    try:
+        req = urllib.request.Request(
+            FALLBACK_API_URL, headers={"Accept": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        tirage_brut = data.get("data", data) if isinstance(data, dict) else data
+        if isinstance(tirage_brut, list) and tirage_brut:
+            tirage_brut = tirage_brut[0]
+        if tirage_brut:
+            return normaliser_tirage_secours(tirage_brut)
+    except Exception as e:
+        derniere_erreur = e
+        print(f"Source de secours échouée aussi : {e}")
+
     raise derniere_erreur
+
+
+def normaliser_tirage_officiel(tirage: dict) -> dict:
+    return {
+        "numero": tirage.get("drawNumber"),
+        "date": tirage.get("drawDate"),
+        "type": tirage.get("drawName"),
+        "crs": tirage.get("drawCRS"),
+        "invitations": tirage.get("drawSize"),
+    }
+
+
+def normaliser_tirage_secours(tirage: dict) -> dict:
+    # Extraction tolérante : les noms de champs exacts de cette API tierce
+    # n'ont pas pu être vérifiés à l'avance, donc on essaie plusieurs
+    # variantes courantes.
+    def premier_present(*cles):
+        for cle in cles:
+            if cle in tirage and tirage[cle] not in (None, ""):
+                return tirage[cle]
+        return None
+
+    return {
+        "numero": premier_present("drawNumber", "number", "round", "id"),
+        "date": premier_present("drawDate", "date"),
+        "type": premier_present("drawName", "category", "type", "program"),
+        "crs": premier_present("drawCRS", "crs", "score", "crsScore"),
+        "invitations": premier_present("drawSize", "invitations", "size", "itas"),
+    }
 
 
 def charger_dernier_numero_connu():
@@ -98,11 +140,11 @@ def sauvegarder_dernier_numero(numero: str) -> None:
 def formater_message(tirage: dict) -> str:
     return (
         "🇨🇦 <b>Nouveau tirage Entrée express !</b>\n\n"
-        f"Numéro du tirage : {tirage.get('drawNumber')}\n"
-        f"Date : {tirage.get('drawDate')}\n"
-        f"Type de tirage : {tirage.get('drawName')}\n"
-        f"Score CRS minimum : {tirage.get('drawCRS')}\n"
-        f"Invitations émises : {tirage.get('drawSize')}\n"
+        f"Numéro du tirage : {tirage.get('numero')}\n"
+        f"Date : {tirage.get('date')}\n"
+        f"Type de tirage : {tirage.get('type')}\n"
+        f"Score CRS minimum : {tirage.get('crs')}\n"
+        f"Invitations émises : {tirage.get('invitations')}\n"
     )
 
 
@@ -119,10 +161,10 @@ def main():
         sys.exit(1)
 
     if tirage is None:
-        print(f"[{datetime.now()}] Aucune donnée reçue depuis IRCC.")
+        print(f"[{datetime.now()}] Aucune donnée reçue.")
         return
 
-    numero_actuel = tirage.get("drawNumber")
+    numero_actuel = tirage.get("numero")
 
     if dernier_connu is None:
         # Premier lancement : on enregistre sans notifier.
